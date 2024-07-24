@@ -78,16 +78,36 @@ def get_final_tensor_T(example, detection_2d_path, detection_3d_path):
     Trv2c = example['Trv2c'][0].cpu()
     rect = rect.float()
     Trv2c = Trv2c.float()
+    P2 = example['P2'][0].cpu()
     img_idx = example['image_idx'][0]
+    image_shape = example['image_shape'][0]
 
     # 3D detection results
     preds_dict = get_3D_results(img_idx, detection_3d_path)
-    box_2d_preds = preds_dict['bbox'][0, :, :]
+    #box_2d_preds = preds_dict['bbox'][0, :, :]
     box_3d_scores = preds_dict['score'].reshape(-1, 1)
     xyz_camera = preds_dict['location'][0, :, :].cpu()
     xyz_lidar = camera_to_lidar(xyz_camera, rect, Trv2c)
     xyz_lidar = torch.tensor(xyz_lidar)
     dis_to_lidar = torch.norm(xyz_lidar[:, :2], p=2, dim=1, keepdim=True) / 82.0
+
+    # Generate 3D projected box (camera 3D bbox -> 2D projection)
+    locs = preds_dict['location'] # camera coordinate
+    dims = preds_dict['dimensions'] # l,h,w
+    angles = preds_dict['rotation_y']
+    camera_box_origin = [0.5, 1.0, 0.5]
+    box_corners = box_torch_ops.center_to_corner_box3d(locs, dims, angles, camera_box_origin, axis=1)
+    box_corners_in_image = box_torch_ops.project_to_image(box_corners, P2)
+    # box_corners_in_image: [N, 8, 2]
+    minxy = torch.min(box_corners_in_image, dim=1)[0]
+    maxxy = torch.max(box_corners_in_image, dim=1)[0]
+    img_height = image_shape[0,0]
+    img_width = image_shape[0,1]
+    minxy[:,0] = torch.clamp(minxy[:,0],min = 0,max = img_width)
+    minxy[:,1] = torch.clamp(minxy[:,1],min = 0,max = img_height)
+    maxxy[:,0] = torch.clamp(maxxy[:,0],min = 0,max = img_width)
+    maxxy[:,1] = torch.clamp(maxxy[:,1],min = 0,max = img_height)
+    box_2d_preds = torch.cat([minxy, maxxy], dim=1)
 
     # 2D detection results
     box_2d_detector = np.zeros((200, 4))
@@ -129,12 +149,3 @@ def get_final_tensor_T(example, detection_2d_path, detection_3d_path):
         non_empty_tensor_index_tensor = tensor_index_tensor[:max_num, :]
 
     return non_empty_iou_test_tensor, non_empty_tensor_index_tensor
-
-
-#def camera_to_lidar(points, r_rect, velo2cam):
-#    points_shape = list(points.shape[0:-1])
-#    if points.shape[-1] == 3:
-#        points = np.concatenate([points, np.ones(points_shape + [1])], axis=-1)
-#    lidar_points = points @ np.linalg.inv((r_rect @ velo2cam).T)
-#    return lidar_points[..., :3]
-
